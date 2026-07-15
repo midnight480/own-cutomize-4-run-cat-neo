@@ -1,0 +1,15 @@
+# 参照リポジトリ (git clone したもの)
+ref/
+
+# ログ
+*.log
+
+# macOS
+.DS_Store
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+
+# 生成される JSON (実行環境固有)
+*-usage.json

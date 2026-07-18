@@ -38,6 +38,9 @@ API_URL = "https://api.anthropic.com/api/oauth/usage"
 BETA_HEADER = "oauth-2025-04-20"
 USER_AGENT = "claude-code/2.1.0"
 
+# 固定表示値 (プラン変更時にここを書き換える)
+PLAN_NAME = "Max"
+
 
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -131,6 +134,31 @@ def fetch_usage(token):
 def build_runcat_json(usage):
     """API レスポンスを RunCat Neo JSON に変換"""
     metrics = []
+
+    # Plan Name (スクリプト定数から固定表示)
+    if PLAN_NAME:
+        metrics.append({
+            "title": "Plan",
+            "formattedValue": PLAN_NAME
+        })
+
+    # Model (limits 配列から active なモデル名を収集)
+    limits = usage.get("limits")
+    if limits and isinstance(limits, list):
+        model_names = []
+        for entry in limits:
+            if not entry.get("is_active", True):
+                continue
+            scope = entry.get("scope") or {}
+            model = scope.get("model") or {}
+            display_name = model.get("display_name", "")
+            if display_name and display_name not in model_names:
+                model_names.append(display_name)
+        if model_names:
+            metrics.append({
+                "title": "Model",
+                "formattedValue": ", ".join(model_names)
+            })
 
     # five_hour window
     five_hour = usage.get("five_hour")

@@ -15,6 +15,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS_DIR="${REPO_DIR}/scripts"
+INSTALL_SCRIPTS_DIR="${HOME}/.local/share/runcat-neo-metrics/scripts"
 LAUNCHAGENTS_SRC="${REPO_DIR}/launchagents"
 LAUNCHAGENTS_DST="${HOME}/Library/LaunchAgents"
 LOG_DIR="${HOME}/Library/Logs/RunCatNeoMetrics"
@@ -54,7 +55,7 @@ install_provider() {
         kiro_api_key_value=$(cat "${HOME}/.config/kiro/api_key" 2>/dev/null | tr -d '[:space:]')
     fi
 
-    sed -e "s|SCRIPTS_DIR|${SCRIPTS_DIR}|g" \
+    sed -e "s|SCRIPTS_DIR|${INSTALL_SCRIPTS_DIR}|g" \
         -e "s|LOG_DIR|${LOG_DIR}|g" \
         -e "s|HOME_DIR|${HOME}|g" \
         -e "s|KIRO_API_KEY_PLACEHOLDER|${kiro_api_key_value}|g" \
@@ -141,10 +142,16 @@ main() {
     echo ""
 
     # ディレクトリ作成
-    mkdir -p "$LAUNCHAGENTS_DST" "$LOG_DIR" "$OUTPUT_DIR"
+    mkdir -p "$LAUNCHAGENTS_DST" "$LOG_DIR" "$OUTPUT_DIR" "$INSTALL_SCRIPTS_DIR"
     info "ディレクトリ作成完了"
 
-    # スクリプトに実行権限付与
+    # スクリプトをインストール先にコピー (Documents 外で LaunchAgent が実行可能に)
+    cp "${SCRIPTS_DIR}/"*.sh "$INSTALL_SCRIPTS_DIR/"
+    cp "${SCRIPTS_DIR}/"*.py "$INSTALL_SCRIPTS_DIR/" 2>/dev/null || true
+    chmod +x "${INSTALL_SCRIPTS_DIR}/"*.sh
+    info "スクリプトを ${INSTALL_SCRIPTS_DIR} にインストール完了"
+
+    # 元のスクリプトにも実行権限付与 (手動実行用)
     chmod +x "${SCRIPTS_DIR}/"*.sh
     info "スクリプト実行権限設定完了"
 

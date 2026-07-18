@@ -289,6 +289,41 @@ agy models
 - JSON ファイルにアトミック書き込み (一時ファイル → `mv`)
 - RunCat Neo がファイル変更を検知して即座にダッシュボード更新
 
+### 更新タイミングとプロバイダーの起動状態
+
+LaunchAgent（2分間隔のスケジューラ）は **macOS にログインしている間は常に動作しています**。各スクリプト自体は数秒で実行して終了する短命プロセスです。Antigravity や Codex のアプリ / プロセスを「常に起動しっぱなしにする」必要はありません。
+
+ただし、**データの取得先がローカルプロセスに依存するプロバイダー**はアプリ起動中のみ更新されます:
+
+| プロバイダー | データソース | アプリ未起動時の動作 |
+|---|---|---|
+| **Claude Code** | リモート API (`api.anthropic.com`) | OAuth トークンが有効なら**常に更新される** (アプリ起動不要) |
+| **Codex** | ローカルセッションログ (`~/.codex/sessions/`) | 既存ログを読むので**常に更新される** (アプリ起動不要だがデータは最後の使用時点のまま) |
+| **Kiro** | `kiro-cli` コマンド実行 | `kiro-cli` がインストール済み + API キー設定済みなら**常に更新される** |
+| **Antigravity** | ローカル Language Server プロセス | **アプリ起動中のみ更新される**。未起動時はスクリプトがエラー終了し、前回取得した JSON がそのまま残る |
+
+**要するに:**
+
+- **Claude Code / Kiro** — ログイン中は常に2分ごとに最新値に更新
+- **Codex** — ログイン中は常に2分ごとに実行されるが、表示値は最後に Codex を使ったセッションの情報
+- **Antigravity** — Windsurf / agy が起動している間だけ2分ごとに更新。終了すると最後のスナップショットが表示され続ける
+
+### macOS のセキュリティに関する注意
+
+`install.sh` はスクリプトを `~/.local/share/runcat-neo-metrics/scripts/` にコピーし、LaunchAgent はそちらを参照します。これは macOS の TCC (Transparency, Consent, and Control) が `~/Documents` や `~/Desktop` 等のフォルダへのアクセスを制限するためです。
+
+もし LaunchAgent のログに `Operation not permitted` が出る場合:
+
+```bash
+# ログ確認
+cat ~/Library/Logs/RunCatNeoMetrics/claude-code-usage.log
+
+# 再インストールで解決
+./install.sh
+```
+
+`install.sh` を再実行すれば、スクリプトが保護対象外のパスにコピーされ、問題が解消します。
+
 ## ファイル構成
 
 ```

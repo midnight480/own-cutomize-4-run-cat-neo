@@ -8,6 +8,7 @@ set -euo pipefail
 LAUNCHAGENTS_DIR="${HOME}/Library/LaunchAgents"
 LOG_DIR="${HOME}/Library/Logs/RunCatNeoMetrics"
 OUTPUT_DIR="${HOME}/.config/runcat-neo-metrics"
+INSTALL_SCRIPTS_DIR="${HOME}/.local/share/runcat-neo-metrics/scripts"
 
 providers=("claude-code" "codex" "kiro" "antigravity")
 
@@ -30,6 +31,12 @@ for provider in "${providers[@]}"; do
     rm -f "${OUTPUT_DIR}/${provider}-usage.json"
 done
 echo "✓ JSON ファイル削除"
+
+# インストール済みスクリプト削除
+if [[ -d "$INSTALL_SCRIPTS_DIR" ]]; then
+    rm -rf "$INSTALL_SCRIPTS_DIR"
+    echo "✓ インストール済みスクリプト削除"
+fi
 
 # ログ削除 (確認)
 if [[ -d "$LOG_DIR" ]]; then

@@ -146,7 +146,7 @@ detect_ports() {
     local pid="$1"
     local ports
 
-    ports=$(lsof -nP -iTCP -sTCP:LISTEN -a -p "$pid" 2>/dev/null \
+    ports=$(/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -a -p "$pid" 2>/dev/null \
         | grep -oE ':\d+' \
         | sed 's/://' \
         | sort -un \

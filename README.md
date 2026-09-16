@@ -9,7 +9,7 @@
 | **Claude Code** | OAuth (自動取得) | 5時間/7日間のレート制限、モデル別制限、オーバーエイジ |
 | **Codex** | ローカルログスキャン (認証不要) | 週間レート制限、セッショントークン数、プラン情報 |
 | **Kiro** | KIRO_API_KEY (ヘッドレスモード) | 月次クレジット使用量、ボーナスクレジット、プラン情報 |
-| **Antigravity** | ローカル Language Server (agy/Windsurf) | Gemini/Claude/GPT モデル別クォータ |
+| **Antigravity** | `agy` CLI (ログイン済み) / ローカル Language Server | Gemini/Claude/GPT の週間・5時間クォータ |
 
 ## セットアップ
 
@@ -210,44 +210,45 @@ kiro-cli chat --no-interactive /usage
 
 ### Antigravity (Windsurf / agy CLI)
 
-ローカルで稼働中の Antigravity Language Server に接続し、gRPC-web API でクォータ情報を取得します。
+[`agy` CLI](https://antigravity.google/docs/cli/overview) の `agy -p /usage --output-format json` でクォータ情報を取得します。`agy` が使えない場合は、起動中の Antigravity / Windsurf アプリの Language Server に gRPC-web で接続します。
 
 **認証方式:**
 
-外部認証は不要です。Antigravity アプリまたは [`agy` CLI](https://antigravity.google/docs/cli/overview) が起動していれば、ローカルの Language Server プロセスを自動検出して接続します。
+`agy` にログイン済みであれば追加の認証は不要です。`/usage` はモデルを呼び出さないため、トークンを消費しません。`agy` を別途起動しておく必要もありません。
 
-> **備考:** `agy` CLI は対話モードで `/models` を実行するとクォータ情報が表示されますが、非対話 (`--print`) モードでは対応していないため、スクリプトは Language Server の gRPC-web エンドポイントに直接接続します。
+> **備考:** `agy` CLI 1.2.x 以降は Language Server が CSRF トークンを要求し、そのトークンを外部に公開しません。そのため `agy` の Language Server には直接接続できず、`agy -p /usage` を使います。
 
 **前提条件:**
-- Windsurf / Antigravity アプリが起動中
-- または `agy` CLI が稼働中
+- `agy` CLI がインストール済みでログイン済み
+- または Windsurf / Antigravity アプリが起動中
 
 ```bash
 # agy CLI のインストール (まだの場合)
 # https://antigravity.google/docs/cli/overview を参照
+
+# ログイン状態の確認 (未ログインなら対話モードで /login)
+agy -p /usage --output-format json
 ```
 
-**検出対象のプロセス:**
-- Antigravity アプリ内の `language_server`
-- Windsurf アプリ内の `language_server`
-- `agy` CLI (CSRF トークン不要)
-
 **表示メトリクス:**
-- Plan: プラン名 (Google AI Pro 等)
-- Gemini: Gemini モデル群のクォータ使用率
-- Claude/GPT: Claude/GPT モデル群のクォータ使用率
+- Gemini Weekly / Gemini 5h: Gemini モデル群の週間・5時間クォータ使用率
+- Claude/GPT Weekly / Claude/GPT 5h: Claude/GPT モデル群の週間・5時間クォータ使用率
+
+アプリの Language Server 経由で取得した場合は、Plan (プラン名) も表示されます。
 
 **動作確認済みの出力例:**
 ```json
 {
   "title": "Antigravity",
   "symbol": "wind",
+  "metricsBarValue": "0.4%",
   "metrics": [
-    { "title": "Plan", "formattedValue": "Google AI Pro" },
-    { "title": "Gemini", "formattedValue": "0%", "normalizedValue": 0 },
-    { "title": "Claude/GPT", "formattedValue": "0%", "normalizedValue": 0 }
+    { "title": "Gemini Weekly", "formattedValue": "0.1%", "normalizedValue": 0.0006 },
+    { "title": "Gemini 5h", "formattedValue": "0.4%", "normalizedValue": 0.0035 },
+    { "title": "Claude/GPT Weekly", "formattedValue": "0%", "normalizedValue": 0 },
+    { "title": "Claude/GPT 5h", "formattedValue": "0%", "normalizedValue": 0 }
   ],
-  "lastUpdatedDate": "2026-07-15T11:37:23Z"
+  "lastUpdatedDate": "2026-09-16T10:56:36Z"
 }
 ```
 
@@ -256,17 +257,14 @@ kiro-cli chat --no-interactive /usage
 # 手動実行
 ./scripts/antigravity-usage.sh
 
-# プロセス確認
-ps aux | grep -i "language.server" | grep -i "antigravity\|windsurf\|codeium"
+# agy CLI での取得確認
+agy -p /usage --output-format json
 
-# agy プロセス確認
-ps aux | grep -i "agy"
+# アプリの Language Server プロセス確認
+ps aux | grep -i "language.server" | grep -i "antigravity\|windsurf\|codeium"
 
 # ポート確認
 lsof -nP -iTCP -sTCP:LISTEN | grep -i "language"
-
-# agy CLI でモデル一覧 (クォータは対話モードのみ)
-agy models
 ```
 
 ## 動作の仕組み
@@ -291,7 +289,7 @@ agy models
 
 ### 更新タイミングとプロバイダーの起動状態
 
-LaunchAgent（2分間隔のスケジューラ）は **macOS にログインしている間は常に動作しています**。各スクリプト自体は数秒で実行して終了する短命プロセスです。Antigravity や Codex のアプリ / プロセスを「常に起動しっぱなしにする」必要はありません。
+LaunchAgent（2分間隔のスケジューラ）は **macOS にログインしている間は常に動作しています**。各スクリプト自体は数秒で実行して終了する短命プロセスです。Codex などのアプリ / プロセスを「常に起動しっぱなしにする」必要はありません。
 
 ただし、**データの取得先がローカルプロセスに依存するプロバイダー**はアプリ起動中のみ更新されます:
 
@@ -300,13 +298,12 @@ LaunchAgent（2分間隔のスケジューラ）は **macOS にログインし�
 | **Claude Code** | リモート API (`api.anthropic.com`) | OAuth トークンが有効なら**常に更新される** (アプリ起動不要) |
 | **Codex** | ローカルセッションログ (`~/.codex/sessions/`) | 既存ログを読むので**常に更新される** (アプリ起動不要だがデータは最後の使用時点のまま) |
 | **Kiro** | `kiro-cli` コマンド実行 | `kiro-cli` がインストール済み + API キー設定済みなら**常に更新される** |
-| **Antigravity** | ローカル Language Server プロセス | **アプリ起動中のみ更新される**。未起動時はスクリプトがエラー終了し、前回取得した JSON がそのまま残る |
+| **Antigravity** | `agy -p /usage` (リモート) / ローカル Language Server | `agy` にログイン済みなら**常に更新される**。`agy` が使えない場合はアプリ起動中のみ更新 |
 
 **要するに:**
 
-- **Claude Code / Kiro** — ログイン中は常に2分ごとに最新値に更新
+- **Claude Code / Kiro / Antigravity** — ログイン中は常に2分ごとに最新値に更新 (Antigravity は `agy` ログイン済みの場合)
 - **Codex** — ログイン中は常に2分ごとに実行されるが、表示値は最後に Codex を使ったセッションの情報
-- **Antigravity** — Windsurf / agy が起動している間だけ2分ごとに更新。終了すると最後のスナップショットが表示され続ける
 
 ### macOS のセキュリティに関する注意
 

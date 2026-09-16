@@ -6,20 +6,23 @@
 # モデルクォータ情報を取得して RunCat Neo のカスタムメトリクス JSON に変換する。
 #
 # 動作原理:
+#   A. agy CLI がインストール済みなら `agy -p /usage --output-format json` で取得
+#      (トークン消費なし、agy を別途起動しておく必要もない)
+#   B. A が使えない場合は起動中のアプリの Language Server に接続:
 #   1. ps コマンドで Antigravity language_server / agy プロセスを検出
-#   2. --csrf_token フラグからCSRFトークンを抽出 (CLI は不要)
+#   2. --csrf_token フラグからCSRFトークンを抽出
 #   3. lsof でリスニングポートを特定
 #   4. localhost の gRPC-web エンドポイントに POST して使用量取得
 #      - RetrieveUserQuotaSummary (推奨、新しい形式)
 #      - GetUserStatus (フォールバック)
 #
 # 前提条件:
-#   - Antigravity (Windsurf) アプリが起動中
-#   - または agy CLI が稼働中 (https://antigravity.google/docs/cli/overview)
+#   - agy CLI がインストール済みでログイン済み
+#   - または Antigravity (Windsurf) アプリが起動中
 #
 # 備考:
-#   agy CLI は対話モードで /models を実行するとクォータが表示されるが、
-#   非対話 (--print) モードでは対応していないため、Language Server に直接接続する。
+#   agy CLI 1.2.x 以降は Language Server が CSRF トークンを要求し、
+#   トークンを起動引数などで公開しないため、B の方法では agy に接続できない。
 #
 # 出力: ~/.config/runcat-neo-metrics/antigravity-usage.json
 # ============================================================================
@@ -30,6 +33,7 @@ set -euo pipefail
 OUTPUT_DIR="${HOME}/.config/runcat-neo-metrics"
 OUTPUT_FILE="${OUTPUT_DIR}/antigravity-usage.json"
 REQUEST_TIMEOUT=8
+AGY_TIMEOUT=30
 
 # gRPC-web パス
 QUOTA_SUMMARY_PATH="/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
@@ -54,6 +58,87 @@ atomic_write() {
     mv -f "$tmp" "$dest"
 }
 
+# --- agy CLI から取得 ---
+fetch_via_agy_cli() {
+    # LaunchAgent の PATH には ~/.local/bin (agy のインストール先) が含まれないことがある
+    local agy_bin
+    agy_bin=$(command -v agy 2>/dev/null || true)
+    if [[ -z "$agy_bin" && -x "${HOME}/.local/bin/agy" ]]; then
+        agy_bin="${HOME}/.local/bin/agy"
+    fi
+    [[ -n "$agy_bin" ]] || return 1
+
+    local response
+    # agy がハングしても LaunchAgent を止めないよう alarm で打ち切る
+    response=$(/usr/bin/perl -e "alarm ${AGY_TIMEOUT}; exec @ARGV" \
+        "$agy_bin" -p /usage --output-format json --print-timeout "$((AGY_TIMEOUT - 5))s" 2>/dev/null) || return 1
+
+    printf '%s' "$response" | python3 -c '
+import json
+import sys
+from datetime import datetime, timezone
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+if data.get("status") != "SUCCESS":
+    sys.exit(1)
+
+groups = (data.get("command") or {}).get("data", {}).get("groups", [])
+
+metrics = []
+max_used = None
+
+for group in groups:
+    group_lower = group.get("name", "").lower()
+    if "gemini" in group_lower:
+        group_label = "Gemini"
+    elif "claude" in group_lower or "gpt" in group_lower:
+        group_label = "Claude/GPT"
+    else:
+        group_label = group.get("name", "Unknown")
+
+    for bucket in group.get("buckets", []):
+        remaining = bucket.get("remaining_fraction")
+        if remaining is None:
+            continue
+
+        window = bucket.get("window", "")
+        if window == "5h":
+            time_label = "5h"
+        elif window == "weekly":
+            time_label = "Weekly"
+        else:
+            time_label = bucket.get("name") or window
+
+        used = min(max(1 - remaining, 0.0), 1.0)
+        used_pct = round(used * 100, 1)
+        metrics.append({
+            "title": f"{group_label} {time_label}",
+            "formattedValue": f"{used_pct}%",
+            "normalizedValue": round(used, 4)
+        })
+
+        # 最も使用率の高いものをバーに表示
+        if max_used is None or used_pct > max_used:
+            max_used = used_pct
+
+if not metrics:
+    sys.exit(1)
+
+snapshot = {
+    "title": "Antigravity",
+    "symbol": "wind",
+    "metricsBarValue": f"{max_used}%",
+    "metrics": metrics,
+    "lastUpdatedDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+}
+print(json.dumps(snapshot, ensure_ascii=False))
+'
+}
+
 # --- プロセス検出 ---
 detect_antigravity_process() {
     local ps_output
@@ -65,6 +150,7 @@ import re, sys, json
 
 ps_output = sys.stdin.read()
 results = []
+cli_without_token = False
 
 for line in ps_output.strip().split('\n'):
     line = line.strip()
@@ -114,10 +200,11 @@ for line in ps_output.strip().split('\n'):
     # CSRF トークン抽出
     csrf_match = re.search(r'--csrf_token[=\s]+([^\s]+)', command, re.IGNORECASE)
     csrf_token = csrf_match.group(1) if csrf_match else None
-    if csrf_token is None and kind != 'cli':
-        continue
     if csrf_token is None:
-        csrf_token = ''
+        # agy CLI はトークンを公開しないため API を呼べない
+        if kind == 'cli':
+            cli_without_token = True
+        continue
 
     # Extension server port
     ext_port_match = re.search(r'--extension_server_port[=\s]+(\d+)', command, re.IGNORECASE)
@@ -135,7 +222,7 @@ for line in ps_output.strip().split('\n'):
     })
 
 if not results:
-    print('NOT_FOUND')
+    print('CLI_ONLY' if cli_without_token else 'NOT_FOUND')
 else:
     print(json.dumps(results[0]))
 "
@@ -212,9 +299,6 @@ try_endpoints() {
     local body="$7"
 
     local requires_csrf="true"
-    if [[ "$kind" == "cli" ]]; then
-        requires_csrf="false"
-    fi
 
     # Extension server を先に試す
     if [[ -n "$extension_port" && "$extension_port" != "null" ]]; then
@@ -459,9 +543,22 @@ PYTHON_SCRIPT
 main() {
     mkdir -p "$OUTPUT_DIR"
 
+    log "agy CLI から取得中..."
+    local agy_json
+    if agy_json=$(fetch_via_agy_cli) && [[ -n "$agy_json" ]]; then
+        atomic_write "$OUTPUT_FILE" "$agy_json"
+        log "完了 (agy CLI): $OUTPUT_FILE"
+        return 0
+    fi
+    log "agy CLI から取得できませんでした。Language Server に接続します..."
+
     log "Antigravity プロセス検出中..."
     local process_info
     process_info=$(detect_antigravity_process)
+
+    if [[ "$process_info" == "CLI_ONLY" ]]; then
+        die "agy CLI のみ起動中ですが、agy -p /usage で取得できず、Language Server にも接続できません (CSRF トークン非公開)。agy にログインし直すか、Antigravity アプリを起動してください。"
+    fi
 
     if [[ "$process_info" == "NOT_FOUND" || -z "$process_info" ]]; then
         die "Antigravity が起動していません。Windsurf/Antigravity を起動してください。"

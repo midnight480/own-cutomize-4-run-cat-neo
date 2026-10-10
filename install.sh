@@ -9,6 +9,7 @@
 #   ./install.sh claude-code  # Claude Code のみ
 #   ./install.sh kiro         # Kiro のみ
 #   ./install.sh antigravity  # Antigravity のみ
+#   ./install.sh cursor       # Cursor のみ
 # ============================================================================
 
 set -euo pipefail
@@ -123,13 +124,29 @@ check_dependency() {
             # Antigravity は実行時にプロセスを検出するため、事前チェックは軽めに
             info "Antigravity: 実行時に Windsurf/Antigravity プロセスを検出します。"
             ;;
+        cursor)
+            # cursor-agent が Keychain に、Cursor IDE が state.vscdb に
+            # セッションを保存する。どちらかがあれば OK
+            local keychain_check
+            keychain_check=$(security find-generic-password -s "cursor-access-token" 2>/dev/null || true)
+            if [[ -n "$keychain_check" ]]; then
+                info "Cursor: Keychain のセッション検出 (cursor-agent)"
+            elif [[ -f "${HOME}/Library/Application Support/Cursor/User/globalStorage/state.vscdb" ]]; then
+                info "Cursor: IDE の state.vscdb 検出"
+            else
+                warn "Cursor: セッション情報が見つかりません。"
+                echo "  cursor-agent: curl https://cursor.com/install -fsS | bash && agent login"
+                echo "  または Cursor IDE にログインしてください。"
+                return 1
+            fi
+            ;;
     esac
     return 0
 }
 
 # --- メイン ---
 main() {
-    local providers=("claude-code" "codex" "kiro" "antigravity")
+    local providers=("claude-code" "codex" "kiro" "antigravity" "cursor")
 
     # 引数で特定プロバイダーのみ指定可能
     if [[ $# -gt 0 ]]; then

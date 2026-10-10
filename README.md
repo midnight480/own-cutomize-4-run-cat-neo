@@ -10,6 +10,7 @@
 | **Codex** | Codex app-server (ローカル JSON-RPC、認証情報は ~/.codex を共有) | レート制限ウィンドウ、当日トークン数、プラン情報 |
 | **Kiro** | KIRO_API_KEY (ヘッドレスモード) | 月次クレジット使用量、ボーナスクレジット、プラン情報 |
 | **Antigravity** | `agy` CLI (ログイン済み) / ローカル Language Server | Gemini/Claude/GPT の週間・5時間クォータ |
+| **Cursor** | cursor-agent / Cursor IDE のセッション (Keychain / state.vscdb、非公式API) | Cursor Models / Other Models のプラン使用率、オンデマンド使用量、プラン情報 |
 
 ## セットアップ
 
@@ -36,6 +37,7 @@ chmod +x install.sh
 ./install.sh codex
 ./install.sh kiro
 ./install.sh antigravity
+./install.sh cursor
 ```
 
 ### RunCat Neo への登録
@@ -48,6 +50,7 @@ chmod +x install.sh
    - `~/.config/runcat-neo-metrics/codex-usage.json`
    - `~/.config/runcat-neo-metrics/kiro-usage.json`
    - `~/.config/runcat-neo-metrics/antigravity-usage.json`
+   - `~/.config/runcat-neo-metrics/cursor-usage.json`
 
 ## プロバイダー詳細
 
@@ -267,6 +270,55 @@ ps aux | grep -i "language.server" | grep -i "antigravity\|windsurf\|codeium"
 lsof -nP -iTCP -sTCP:LISTEN | grep -i "language"
 ```
 
+### Cursor
+
+`cursor-agent` (Cursor CLI) または Cursor IDE が保存するセッション JWT を使い、Cursor ダッシュボードの使用量エンドポイント (`https://cursor.com/api/usage-summary`) から使用量を取得します。
+
+> **注意:** 個人プランの使用量を返す公式 API は存在しないため、ダッシュボードが内部で使う**非公式エンドポイント**を利用しています。仕様変更で動かなくなる可能性があります (利用量の多い OSS ツールと同じ方式です)。
+
+**認証情報の読み取り順:**
+
+アクセストークン:
+1. macOS Keychain (`cursor-access-token` サービス) — `agent login` が書き込む
+2. Cursor IDE の `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (`cursorAuth/accessToken`)
+
+アクセストークン (JWT、約60日有効) が期限切れの場合は、`cursor-refresh-token` / `cursorAuth/refreshToken` で `https://api2.cursor.sh/oauth/token` を呼んで自動更新します (トークンの書き戻しはしません)。リフレッシュも失効していたら再ログインが必要です。
+
+**前提条件:**
+
+```bash
+# cursor-agent のインストール (未インストールの場合)
+curl https://cursor.com/install -fsS | bash
+
+# ログイン (ブラウザが開く)
+agent login
+```
+
+または Cursor IDE にログイン済みであること。
+
+**表示メトリクス:**
+- Plan: プラン名 (`membershipType` から取得: Free / Pro / Pro+ / Ultra / Enterprise)
+- Cursor Models: Auto / Composer / Grok 系など Cursor 管理モデルの使用率 (`autoPercentUsed`)
+- Other Models: API 経由モデルの使用率 (`apiPercentUsed`)
+- Plan Usage: 上記が無い環境向けの合計使用率 (従量の場合は `$使用額/$上限`)
+- On-Demand: オンデマンド (従量課金) の使用額
+- Resets: 請求周期のリセット日
+
+**トラブルシューティング:**
+```bash
+# 手動実行
+./scripts/cursor-usage.sh
+
+# セッションの確認 (エントリがあれば OK)
+security find-generic-password -s cursor-access-token
+security find-generic-password -s cursor-refresh-token
+
+# セッション失効時は再ログイン
+agent login
+```
+
+初回実行時に macOS が「security がキーチェーンの情報を使用しようとしています」と確認ダイアログを出す場合があります。「常に許可」を選んでください。
+
 ## 動作の仕組み
 
 ```
@@ -299,10 +351,11 @@ LaunchAgent（2分間隔のスケジューラ）は **macOS にログインし�
 | **Codex** | `codex app-server` (ローカル JSON-RPC) | Codex にログイン済みなら**常に更新される** (アプリ起動不要) |
 | **Kiro** | `kiro-cli` コマンド実行 | `kiro-cli` がインストール済み + API キー設定済みなら**常に更新される** |
 | **Antigravity** | `agy -p /usage` (リモート) / ローカル Language Server | `agy` にログイン済みなら**常に更新される**。`agy` が使えない場合はアプリ起動中のみ更新 |
+| **Cursor** | リモート API (`cursor.com`、非公式) | セッションが有効なら**常に更新される** (アプリ起動不要) |
 
 **要するに:**
 
-- **Claude Code / Codex / Kiro / Antigravity** — ログイン中は常に2分ごとに最新値に更新 (Antigravity は `agy` ログイン済みの場合)
+- **Claude Code / Codex / Kiro / Antigravity / Cursor** — ログイン中は常に2分ごとに最新値に更新 (Antigravity は `agy` ログイン済みの場合)
 
 ### macOS のセキュリティに関する注意
 
@@ -338,12 +391,14 @@ cat ~/Library/Logs/RunCatNeoMetrics/claude-code-usage.log
 │   ├── codex-usage.sh         # Codex 使用量取得
 │   ├── kiro-usage.sh          # Kiro 使用量取得
 │   ├── kiro_parse.py          # Kiro 出力パーサー
-│   └── antigravity-usage.sh   # Antigravity 使用量取得
+│   ├── antigravity-usage.sh   # Antigravity 使用量取得
+│   └── cursor-usage.sh        # Cursor 使用量取得
 └── launchagents/
     ├── com.runcat-neo.claude-code-usage.plist
     ├── com.runcat-neo.codex-usage.plist
     ├── com.runcat-neo.kiro-usage.plist
-    └── com.runcat-neo.antigravity-usage.plist
+    ├── com.runcat-neo.antigravity-usage.plist
+    └── com.runcat-neo.cursor-usage.plist
 ```
 
 ## カスタマイズ
@@ -381,6 +436,7 @@ launchctl unload ~/Library/LaunchAgents/com.runcat-neo.claude-code-usage.plist
 launchctl unload ~/Library/LaunchAgents/com.runcat-neo.codex-usage.plist
 launchctl unload ~/Library/LaunchAgents/com.runcat-neo.kiro-usage.plist
 launchctl unload ~/Library/LaunchAgents/com.runcat-neo.antigravity-usage.plist
+launchctl unload ~/Library/LaunchAgents/com.runcat-neo.cursor-usage.plist
 rm -f ~/Library/LaunchAgents/com.runcat-neo.*.plist
 
 # JSON 削除
@@ -396,6 +452,7 @@ rm -f ~/.config/runcat-neo-metrics/*-usage.json
 - [Codex 環境変数](https://developers.openai.com/codex/environment-variables) — CODEX_API_KEY 等
 - [Kiro ヘッドレスモード](https://aws.amazon.com/jp/blogs/news/kiro-introducing-headless-mode/) — API キーによるブラウザ不要認証
 - [Antigravity CLI (agy)](https://antigravity.google/docs/cli/overview) — agy CLI ドキュメント
+- [Cursor CLI](https://cursor.com/docs/cli/overview) — cursor-agent ドキュメント
 
 ## License
 

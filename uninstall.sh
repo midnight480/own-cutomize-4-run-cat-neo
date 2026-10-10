@@ -10,7 +10,7 @@ LOG_DIR="${HOME}/Library/Logs/RunCatNeoMetrics"
 OUTPUT_DIR="${HOME}/.config/runcat-neo-metrics"
 INSTALL_SCRIPTS_DIR="${HOME}/.local/share/runcat-neo-metrics/scripts"
 
-providers=("claude-code" "codex" "kiro" "antigravity")
+providers=("claude-code" "codex" "kiro" "antigravity" "cursor")
 
 echo "RunCat Neo カスタムメトリクス アンインストール"
 echo ""

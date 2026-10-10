@@ -7,7 +7,7 @@
 | プロバイダー | 認証方式 | 表示内容 |
 |---|---|---|
 | **Claude Code** | OAuth (自動取得) | 5時間/7日間のレート制限、モデル別制限、オーバーエイジ |
-| **Codex** | ローカルログスキャン (認証不要) | 週間レート制限、セッショントークン数、プラン情報 |
+| **Codex** | Codex app-server (ローカル JSON-RPC、認証情報は ~/.codex を共有) | レート制限ウィンドウ、当日トークン数、プラン情報 |
 | **Kiro** | KIRO_API_KEY (ヘッドレスモード) | 月次クレジット使用量、ボーナスクレジット、プラン情報 |
 | **Antigravity** | `agy` CLI (ログイン済み) / ローカル Language Server | Gemini/Claude/GPT の週間・5時間クォータ |
 
@@ -60,6 +60,7 @@ Claude Code の OAuth 認証トークンを使い、Anthropic の使用量 API (
 2. macOS Keychain (`Claude Code-credentials` サービス)
 
 **表示メトリクス:**
+- Plan: プラン名 (認証情報の `subscriptionType` から自動取得)
 - 5h: 5時間ウィンドウの使用率
 - 7d: 7日間ウィンドウの使用率
 - 7d Opus/Sonnet: モデル別の7日間制限 (プランによる)
@@ -93,48 +94,44 @@ claude login
 
 ### Codex (OpenAI)
 
-Codex のローカルセッションログ (`~/.codex/sessions/`) をスキャンし、最新の `token_count` イベントからレート制限情報を抽出します。
+Codex CLI に内蔵された app-server (`codex app-server --listen stdio://`) を起動し、JSON-RPC の `account/read`・`account/rateLimits/read`・`account/usage/read` を呼び出してレート制限とプラン情報を取得します。
 
 **認証方式:**
 
-認証不要です。Codex Desktop / CLI がセッションログを `~/.codex/sessions/` に自動的に書き出すため、ローカルファイルの読み取りのみで動作します。
+追加の認証設定は不要です。`~/.codex/auth.json` に保存済みの Codex ログイン情報を app-server がそのまま利用します (ChatGPT ログイン / API キーのいずれにも対応)。
 
 **データソース:**
-- `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
-- 各セッション内の `event_msg` type=`token_count` イベントに `rate_limits` と `token_usage` が含まれる
+- `codex app-server` (stdio) の JSON-RPC API — Codex Desktop が内部で使っているのと同じ仕組み
+- フォールバック: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` の `token_count` イベント (旧バージョン向け)
 
 **前提条件:**
-- [Codex](https://chatgpt.com/codex) Desktop アプリまたは CLI がインストール済み
-- 少なくとも1回 Codex を使用済み (セッションログが存在すること)
+- [Codex](https://chatgpt.com/codex) CLI がインストール済み (`codex` コマンドが PATH 上にあること)
+- Codex にログイン済み (`codex login`)
 
 ```bash
 # Codex CLI インストール
 curl -fsSL https://chatgpt.com/codex/install.sh | sh
-
-# ヘッドレス実行 (CI/自動化) には CODEX_API_KEY を使用
-# https://developers.openai.com/codex/environment-variables
 ```
 
 **表示メトリクス:**
-- Plan: プラン名 (Codex Free / Codex Pro)
-- Weekly: 週間レート制限の使用率
-- 5h: 5時間レート制限 (存在する場合)
+- Plan: プラン名 (Codex Free / Codex Pro など)
+- 5h / Weekly / Monthly: レート制限ウィンドウの使用率 (プランにより異なる)
 - Resets in: リセットまでの残り時間
-- Credits: クレジット残高 (Pro プラン)
-- Session: 最新セッションのトークン使用量
+- Credits: クレジット残高 (クレジット保有時)
+- Today: 当日のトークン使用量
 
 **動作確認済みの出力例:**
 ```json
 {
   "title": "Codex",
   "symbol": "terminal",
-  "metricsBarValue": "44%",
+  "metricsBarValue": "0%",
   "metrics": [
     { "title": "Plan", "formattedValue": "Codex Free" },
-    { "title": "Weekly", "formattedValue": "44.0%", "normalizedValue": 0.44 },
-    { "title": "Session", "formattedValue": "38.5K tokens" }
+    { "title": "Monthly", "formattedValue": "0%", "normalizedValue": 0.0 },
+    { "title": "Resets in", "formattedValue": "30.0d" }
   ],
-  "lastUpdatedDate": "2026-07-15T12:03:35Z"
+  "lastUpdatedDate": "2026-10-10T01:11:28Z"
 }
 ```
 
@@ -143,11 +140,14 @@ curl -fsSL https://chatgpt.com/codex/install.sh | sh
 # 手動実行
 ./scripts/codex-usage.sh
 
-# セッションログ確認
-find ~/.codex/sessions -name "rollout-*.jsonl" | sort | tail -5
+# codex コマンドの確認
+codex --version
 
-# 最新の token_count イベント確認
-grep "token_count" ~/.codex/sessions/2026/*/*/*.jsonl | tail -1 | python3 -m json.tool
+# app-server の動作確認 (initialize に応答すれば OK)
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"test","version":"0"}}}' | codex app-server --listen stdio://
+
+# 旧バージョン向けフォールバック用セッションログの確認
+find ~/.codex/sessions -name "rollout-*.jsonl" | sort | tail -5
 ```
 
 ### Kiro
@@ -296,14 +296,13 @@ LaunchAgent（2分間隔のスケジューラ）は **macOS にログインし�
 | プロバイダー | データソース | アプリ未起動時の動作 |
 |---|---|---|
 | **Claude Code** | リモート API (`api.anthropic.com`) | OAuth トークンが有効なら**常に更新される** (アプリ起動不要) |
-| **Codex** | ローカルセッションログ (`~/.codex/sessions/`) | 既存ログを読むので**常に更新される** (アプリ起動不要だがデータは最後の使用時点のまま) |
+| **Codex** | `codex app-server` (ローカル JSON-RPC) | Codex にログイン済みなら**常に更新される** (アプリ起動不要) |
 | **Kiro** | `kiro-cli` コマンド実行 | `kiro-cli` がインストール済み + API キー設定済みなら**常に更新される** |
 | **Antigravity** | `agy -p /usage` (リモート) / ローカル Language Server | `agy` にログイン済みなら**常に更新される**。`agy` が使えない場合はアプリ起動中のみ更新 |
 
 **要するに:**
 
-- **Claude Code / Kiro / Antigravity** — ログイン中は常に2分ごとに最新値に更新 (Antigravity は `agy` ログイン済みの場合)
-- **Codex** — ログイン中は常に2分ごとに実行されるが、表示値は最後に Codex を使ったセッションの情報
+- **Claude Code / Codex / Kiro / Antigravity** — ログイン中は常に2分ごとに最新値に更新 (Antigravity は `agy` ログイン済みの場合)
 
 ### macOS のセキュリティに関する注意
 
@@ -320,6 +319,12 @@ cat ~/Library/Logs/RunCatNeoMetrics/claude-code-usage.log
 ```
 
 `install.sh` を再実行すれば、スクリプトが保護対象外のパスにコピーされ、問題が解消します。
+
+### ログのローテーション
+
+各スクリプトは起動時に自分のログファイル (`~/Library/Logs/RunCatNeoMetrics/<provider>-usage.log`) を検査し、1MB を超えていたら末尾 512KB だけを残して切り詰めます。外部のログローテーション設定は不要です。
+
+また `codex-usage.sh` は `~/.codex/logs_2.sqlite` (Codex の内部ログ DB) の空き領域回収も行います。Codex 自体が古い行を削除しますが削除済みページはファイル内に残るため、1日1回まで `PRAGMA incremental_vacuum` を実行して実サイズを縮小します。デーモン稼働中にロックが取れない場合はスキップされ、次回以降に再試行されます。
 
 ## ファイル構成
 

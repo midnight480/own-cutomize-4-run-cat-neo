@@ -19,6 +19,22 @@ OUTPUT_FILE="${OUTPUT_DIR}/claude-code-usage.json"
 
 mkdir -p "$OUTPUT_DIR"
 
+# --- ログローテーション ---
+# LaunchAgent が追記し続けるログの肥大化を防ぐ。launchd は O_APPEND でログを
+# 開いているため、inode を維持したまま内容だけ末尾側に切り詰める。
+LOG_FILE="${HOME}/Library/Logs/RunCatNeoMetrics/$(basename "$0" .sh).log"
+LOG_MAX_BYTES=1048576  # 1MB
+
+if [[ -f "$LOG_FILE" ]]; then
+    size=$(stat -f %z "$LOG_FILE" 2>/dev/null || echo 0)
+    if (( size > LOG_MAX_BYTES )); then
+        tmp=$(mktemp "${LOG_FILE}.XXXXXX")
+        tail -c $((LOG_MAX_BYTES / 2)) "$LOG_FILE" > "$tmp"
+        cat "$tmp" > "$LOG_FILE"
+        rm -f "$tmp"
+    fi
+fi
+
 exec python3 << 'PYTHON_EOF'
 import json
 import os
@@ -38,8 +54,18 @@ API_URL = "https://api.anthropic.com/api/oauth/usage"
 BETA_HEADER = "oauth-2025-04-20"
 USER_AGENT = "claude-code/2.1.0"
 
-# 固定表示値 (プラン変更時にここを書き換える)
-PLAN_NAME = "Max"
+# subscriptionType が取得できない場合のフォールバック表示値
+# (通常は credentials の subscriptionType から自動取得される)
+PLAN_NAME_FALLBACK = None
+
+# credentials の subscriptionType → 表示名
+PLAN_LABELS = {
+    "free": "Free",
+    "pro": "Pro",
+    "max": "Max",
+    "team": "Team",
+    "enterprise": "Enterprise",
+}
 
 
 def log(msg):
@@ -60,23 +86,36 @@ def atomic_write(path, content):
     os.replace(tmp, path)
 
 
-def get_access_token():
-    """認証トークンを取得 (credentials.json → Keychain)"""
+def _valid_token(oauth):
+    """OAuth エントリから有効なアクセストークンを取り出す"""
+    token = oauth.get("accessToken", "")
+    if not token:
+        return None
+    expires_at = oauth.get("expiresAt", 0)
+    if expires_at > 0:
+        expires_sec = expires_at / 1000.0 if expires_at > 9999999999 else expires_at
+        if time.time() >= expires_sec:
+            return None
+    return token
+
+
+def get_credentials():
+    """認証トークンとプラン種別を取得 (credentials.json → Keychain)
+
+    Returns: (access_token, subscription_type)
+    """
+    subscription_type = None
+
     # 1. credentials.json
     if os.path.isfile(CREDENTIALS_FILE):
         try:
             with open(CREDENTIALS_FILE) as f:
                 data = json.load(f)
             oauth = data.get("claudeAiOauth", data)
-            token = oauth.get("accessToken", "")
+            subscription_type = oauth.get("subscriptionType") or subscription_type
+            token = _valid_token(oauth)
             if token:
-                expires_at = oauth.get("expiresAt", 0)
-                if expires_at > 0:
-                    expires_sec = expires_at / 1000.0 if expires_at > 9999999999 else expires_at
-                    if time.time() < expires_sec:
-                        return token
-                else:
-                    return token
+                return token, subscription_type
         except Exception:
             pass
 
@@ -89,19 +128,22 @@ def get_access_token():
         if result.returncode == 0 and result.stdout.strip():
             data = json.loads(result.stdout.strip())
             oauth = data.get("claudeAiOauth", data)
-            token = oauth.get("accessToken", "")
+            subscription_type = oauth.get("subscriptionType") or subscription_type
+            token = _valid_token(oauth)
             if token:
-                expires_at = oauth.get("expiresAt", 0)
-                if expires_at > 0:
-                    expires_sec = expires_at / 1000.0 if expires_at > 9999999999 else expires_at
-                    if time.time() < expires_sec:
-                        return token
-                else:
-                    return token
+                return token, subscription_type
     except Exception:
         pass
 
     die("アクセストークンが見つかりません。'claude login' を実行してください。")
+
+
+def plan_label(subscription_type):
+    """subscriptionType を表示名に変換"""
+    if not subscription_type:
+        return PLAN_NAME_FALLBACK
+    key = str(subscription_type).lower()
+    return PLAN_LABELS.get(key, key.replace("_", " ").title())
 
 
 def fetch_usage(token):
@@ -131,15 +173,15 @@ def fetch_usage(token):
         die(f"ネットワークエラー: {e}")
 
 
-def build_runcat_json(usage):
+def build_runcat_json(usage, plan_name):
     """API レスポンスを RunCat Neo JSON に変換"""
     metrics = []
 
-    # Plan Name (スクリプト定数から固定表示)
-    if PLAN_NAME:
+    # Plan Name (credentials の subscriptionType から取得)
+    if plan_name:
         metrics.append({
             "title": "Plan",
-            "formattedValue": PLAN_NAME
+            "formattedValue": plan_name
         })
 
     # Model (limits 配列から active なモデル名を収集)
@@ -276,13 +318,13 @@ def build_runcat_json(usage):
 
 def main():
     log("アクセストークン取得中...")
-    token = get_access_token()
+    token, subscription_type = get_credentials()
 
     log("使用量 API 呼び出し中...")
     usage = fetch_usage(token)
 
     log("RunCat Neo JSON 生成中...")
-    runcat_json = build_runcat_json(usage)
+    runcat_json = build_runcat_json(usage, plan_label(subscription_type))
 
     atomic_write(OUTPUT_FILE, runcat_json)
     log(f"完了: {OUTPUT_FILE}")

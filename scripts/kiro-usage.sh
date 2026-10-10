@@ -66,6 +66,24 @@ atomic_write() {
     mv -f "$tmp" "$dest"
 }
 
+# --- ログローテーション ---
+# LaunchAgent が追記し続けるログの肥大化を防ぐ。launchd は O_APPEND でログを
+# 開いているため、inode を維持したまま内容だけ末尾側に切り詰める。
+LOG_FILE="${HOME}/Library/Logs/RunCatNeoMetrics/$(basename "$0" .sh).log"
+LOG_MAX_BYTES=1048576  # 1MB
+
+trim_log() {
+    [[ -f "$LOG_FILE" ]] || return 0
+    local size
+    size=$(stat -f %z "$LOG_FILE" 2>/dev/null || echo 0)
+    (( size <= LOG_MAX_BYTES )) && return 0
+    local tmp
+    tmp=$(mktemp "${LOG_FILE}.XXXXXX")
+    tail -c $((LOG_MAX_BYTES / 2)) "$LOG_FILE" > "$tmp"
+    cat "$tmp" > "$LOG_FILE"
+    rm -f "$tmp"
+}
+
 # ANSI エスケープシーケンスを除去 + kiro-cli のプロンプト装飾を除去
 strip_ansi() {
     sed $'s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g' | sed 's/^λ↯//; s/λ↯//g' | tr -d '\r'
@@ -153,6 +171,7 @@ parse_and_convert() {
 # --- メイン ---
 main() {
     mkdir -p "$OUTPUT_DIR"
+    trim_log
 
     log "kiro-cli 検出中..."
     local kiro_cli
